@@ -1,0 +1,7 @@
+{
+  "name": "personal-claude-statusline",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": { "./tui": "./tui.tsx" },
+  "scripts": { "test": "python3 -B -m unittest limits_test.py && node --test core.test.mjs" }
+}

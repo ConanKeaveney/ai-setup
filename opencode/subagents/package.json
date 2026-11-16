@@ -1,0 +1,7 @@
+{
+  "name": "personal-subagents-sidebar",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": { "./tui": "./tui.tsx" },
+  "scripts": { "test": "node --test core.test.mjs" }
+}

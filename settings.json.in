@@ -1,0 +1,25 @@
+{
+  "model": "opus",
+  "hooks": {
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "python3 @HOME@/.claude/hooks/one-line-default.py" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "python3 @HOME@/.claude/hooks/no-poll-loop.py" }] }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "@HOME@/.claude/statusline.py",
+    "refreshInterval": 10
+  },
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "@HOME@/.claude/subagent-statusline.py"
+  },
+  "enabledPlugins": {
+    "feature-dev@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "code-review@claude-plugins-official": true
+  }
+}

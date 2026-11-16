@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Block until a condition holds, in ONE tool call, then print a short verdict.
+
+    wait-for --pid 4321
+    wait-for --log run.log --until '^EXIT=|FAILED|panicked|error\\['
+    wait-for --check 'python3 scripts/build_lease.py --status | grep -q free'
+    wait-for --for 300
+
+Several conditions may be given; the first one met ends the wait.
+Exit 0: met. Exit 124: --max reached, nothing met; run the same command again.
+"""
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+
+def pid_gone(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return stat == "" or stat.startswith("Z")
+
+
+def log_match(path, pattern, offset):
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            chunk = fh.read().decode("utf-8", "replace")
+    except FileNotFoundError:
+        return None
+    for line in chunk.splitlines():
+        if pattern.search(line):
+            return line
+    return None
+
+
+def failure_lines(path, offset, n, pattern, skip=None):
+    """Up to n lines matching pattern, minus the already-printed skip line, and the count of lines scanned."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except FileNotFoundError:
+        return [], 0
+    hits = [l[:LINE_MAX] for l in lines if pattern.search(l) and l.strip() != skip]
+    return hits[:n], len(lines)
+
+
+def tail(path, n):
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 64 * 1024))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except FileNotFoundError:
+        return []
+    return lines[-n:]
+
+
+MODEL_LOCK = os.environ.get("WAIT_FOR_MODEL_LOCK", os.path.expanduser("~/labelling-bench-work/bases/model_lock.py"))
+BUILD_LEASE = os.environ.get("WAIT_FOR_BUILD_LEASE", "")
+STATE_DIR = os.environ.get("WAIT_FOR_STATE_DIR", os.path.expanduser("~/.claude/poll-state"))
+CHAIN_GAP_S = 120
+LINE_MAX = 200
+FAILURE_MAX = 5
+ZERO = r"(?!\s*[=:]\s*0\b)"
+FAILURE = re.compile(
+    r"FAILED" + ZERO + r"|panicked|error\[|Traceback|Error:(?!\s*0\b)|^EXIT=[1-9]|fatal:|Exception|Killed|SIGKILL|SIGSEGV|\bFAIL\b"
+    r"|^\s*ERROR\b" + ZERO + r"|\[(?:ERROR|FATAL|CRITICAL)\]|test result: FAILED"
+)
+FAILURE_NOCASE = re.compile(
+    r"assertion failed|\bsignal\b|command not found|(?:exit|return)(?:ed)?\s*(?:code|status)\s*(?:with\s*)?[:=]?\s*[1-9]|exited with (?:code|status)?\s*[1-9]|\bstatus\s+[1-9]",
+    re.I,
+)
+
+
+def status_lines(script, flag="--status"):
+    try:
+        out = subprocess.run([sys.executable, script, flag], capture_output=True, text=True, timeout=8).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return out.splitlines()
+
+
+STATUS_ROW = re.compile(r"^(\S+)\s+([\d.]+) min\s+job age\s+[\d.]+ min\s+pid (\d+)\s+(\S+)")
+
+
+def describe(line):
+    m = STATUS_ROW.match(line)
+    return f"{m.group(4)} (pid {m.group(3)}, {m.group(1)} {m.group(2)} min)" if m else " ".join(line.split()[:6])
+
+
+def queue_notes(a):
+    """Lines saying a lock or build-slot queue is ahead of the job, or none. Names the target when its pid or log appears in the status."""
+    needles = [str(a.pid)] if a.pid else []
+    if a.log:
+        needles.append(os.path.basename(a.log))
+    notes = []
+    lines = status_lines(MODEL_LOCK)
+    waiting = [l for l in lines if l.startswith("waiting")]
+    holders = [l for l in lines if l.startswith("holding")]
+    if waiting:
+        mine = any(n and n in l for n in needles for l in waiting)
+        notes.append(f"queue: model lock has {len(waiting)} waiting, {len(holders)} holding" + (" -- THIS job is waiting" if mine else " (shared queue; your job may not be in it)"))
+        notes.append("  waiting: " + "; ".join(describe(l) for l in waiting[:3]))
+        if holders:
+            notes.append("  holding: " + "; ".join(describe(l) for l in holders[:3]))
+    lease = status_lines(BUILD_LEASE)
+    if lease:
+        m = re.match(r"(\d+)/(\d+) build leases held", lease[0])
+        if m and m.group(1) == m.group(2):
+            notes.append(f"queue: build slots full ({m.group(1)}/{m.group(2)}); a job needing a slot waits for one to free")
+    if notes:
+        notes.append("  the queue is not shortened by re-issuing this wait; do other work or wait once with --max 540")
+    return notes
+
+
+def chain_count(a, argv, met):
+    """How many times in a row this same condition has come back NOT YET, and the minutes since the first."""
+    key = hashlib.sha1(" ".join(x for i, x in enumerate(argv) if x != "--max" and (i == 0 or argv[i - 1] != "--max")).encode()).hexdigest()[:16]
+    path = os.path.join(STATE_DIR, f"wait-for-{key}.json")
+    now = time.time()
+    try:
+        with open(path) as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        state = {}
+    if state and now - state.get("last", 0) > a.max + CHAIN_GAP_S:
+        state = {}
+    if met:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return 0, 0.0
+    state = {"first": state.get("first", now), "last": now, "n": state.get("n", 0) + 1}
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(state, fh)
+    except OSError:
+        pass
+    return state["n"], (now - state["first"]) / 60
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--pid", type=int, help="until this process exits")
+    ap.add_argument("--log", help="file to watch with --until")
+    ap.add_argument("--until", help="regex; until a line of --log matches")
+    ap.add_argument("--new-only", action="store_true", help="ignore lines already in --log when the wait starts")
+    ap.add_argument("--check", help="shell command; until it exits 0")
+    ap.add_argument("--for", dest="duration", type=float, help="just wait this many seconds")
+    ap.add_argument("--max", type=float, default=110, help="give up after this many seconds (default 110, fits the default Bash timeout; with Bash timeout 600000 use up to 540)")
+    ap.add_argument("--every", type=float, default=3, help="seconds between checks")
+    ap.add_argument("--fail", help="regex; extra failure words to report from --log")
+    ap.add_argument("--tail", type=int, default=5, help="lines of --log to print when the wait is met")
+    a = ap.parse_args()
+
+    if a.until and not a.log:
+        ap.error("--until needs --log")
+    if not (a.pid or a.until or a.check or a.duration):
+        ap.error("give at least one of --pid, --log/--until, --check, --for")
+
+    pattern = re.compile(a.until) if a.until else None
+    offset = 0
+    if a.log and a.new_only:
+        try:
+            offset = os.path.getsize(a.log)
+        except OSError:
+            offset = 0
+
+    start = time.monotonic()
+    limit = min(a.max, a.duration) if a.duration else a.max
+    met = None
+    matched_line = None
+    while met is None:
+        elapsed = time.monotonic() - start
+        if a.pid and pid_gone(a.pid):
+            met = f"pid {a.pid} exited"
+        elif pattern:
+            line = log_match(a.log, pattern, offset)
+            if line is not None:
+                matched_line = line.strip()
+                met = f"{a.log} matched: {matched_line[:200]}"
+        if met is None and a.check:
+            if subprocess.run(a.check, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                met = f"check passed: {a.check[:120]}"
+        if met is None and elapsed >= limit:
+            break
+        if met is None:
+            time.sleep(min(a.every, max(0.1, limit - elapsed)))
+
+    elapsed = time.monotonic() - start
+    if met is None and a.duration and elapsed >= limit:
+        met = f"waited {elapsed:.0f}s" + (" (capped by --max)" if limit < a.duration else "")
+    print(f"{'MET' if met else 'NOT YET'} after {elapsed:.0f}s: {met or 'nothing met; run the same command again'}")
+    n, minutes = chain_count(a, sys.argv[1:], bool(met))
+    if not met and n >= 2:
+        print(f"wait {n} on this condition, {minutes:.0f} min" + ("; use --max 540, Bash timeout 600000." if a.max < 400 else ""))
+    if not met:
+        for note in queue_notes(a):
+            print(note)
+    if a.log:
+        extra = re.compile(a.fail) if a.fail else None
+        scan = type("P", (), {"search": staticmethod(lambda l: FAILURE.search(l) or FAILURE_NOCASE.search(l) or (extra and extra.search(l)))})
+        hits, scanned = failure_lines(a.log, offset, FAILURE_MAX, scan, matched_line)
+        for line in hits:
+            print(line)
+        if not hits and not (matched_line and scan.search(matched_line)):
+            print(f"no failure lines in {scanned} lines of {a.log}")
+        if met:
+            for line in tail(a.log, a.tail):
+                print(line[:LINE_MAX])
+    return 0 if met else 124
+
+
+if __name__ == "__main__":
+    sys.exit(main())
