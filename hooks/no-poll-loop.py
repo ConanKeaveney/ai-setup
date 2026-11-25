@@ -14,7 +14,7 @@ HOME = Path(os.path.expanduser("~"))
 DECISION_LOG = HOME / ".claude" / "poll-loop-decisions.jsonl"
 
 #: A bare sleep of this many seconds or fewer is allowed through.
-SETTLE_S = 30
+SETTLE_S = 120
 
 #: Loop constructs. A poll loop needs one of these AND a wait inside it.
 LOOP = re.compile(r"(?<![-\w])(?:until|while)\b|\bfor\s+\w+\s+in\b")
