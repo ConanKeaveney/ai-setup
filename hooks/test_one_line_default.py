@@ -18,16 +18,19 @@ HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "one-line-defaul
 
 
 def _transcript(pairs: list[tuple[str, str]]) -> str:
-    """A JSONL transcript from (role, text) pairs, in order."""
+    """A JSONL transcript from (role, text) pairs; role "tool" writes a tool call and its result."""
     fd, path = tempfile.mkstemp(suffix=".jsonl")
     with os.fdopen(fd, "w") as fh:
         for role, text in pairs:
-            fh.write(
-                json.dumps(
-                    {"message": {"role": role, "content": [{"type": "text", "text": text}]}}
-                )
-                + "\n"
-            )
+            if role == "tool":
+                recs = [
+                    {"message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}]}},
+                    {"message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": text}]}},
+                ]
+            else:
+                recs = [{"message": {"role": role, "content": [{"type": "text", "text": text}]}}]
+            for rec in recs:
+                fh.write(json.dumps(rec) + "\n")
     return path
 
 
@@ -124,6 +127,12 @@ def main() -> int:
         blob = "word " * 200
         r = run([("user", "did it merge"), ("assistant", blob)], "s6", home)
         check("one huge paragraph is caught by the char bound", r.get("decision") == "block", r)
+
+    with tempfile.TemporaryDirectory() as home:
+        r = run([("user", "fix it"), ("assistant", "Reproduced the failure."), ("tool", "ok")], "s8", home)
+        check("a mid-turn note followed by tool calls is not judged", r.get("decision") != "block", r)
+        r = run([("user", "fix it"), ("tool", "ok"), ("assistant", BAD_OPENER)], "s8b", home)
+        check("the final answer after tool calls is still judged", r.get("decision") == "block", r)
 
     # Fails open on a transcript that is not there.
     out = subprocess.run(

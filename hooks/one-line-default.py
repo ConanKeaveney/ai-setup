@@ -140,6 +140,12 @@ def _last_messages(transcript_path: str) -> tuple[str, str]:
                 continue
             role = (rec.get("message") or {}).get("role") or rec.get("role")
             content = (rec.get("message") or {}).get("content")
+            if isinstance(content, list) and any(
+                isinstance(c, dict) and c.get("type") in ("tool_use", "tool_result")
+                for c in content
+            ):
+                assistant = ""
+                continue
             if isinstance(content, list):
                 text = "".join(
                     c.get("text", "")
@@ -180,6 +186,9 @@ def main() -> int:
     except Exception:
         return 0
 
+    final = payload.get("last_assistant_message")
+    if isinstance(final, str) and final.strip():
+        assistant = final
     if not assistant.strip():
         return 0
 
