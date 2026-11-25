@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stop hook: block once when a final answer runs long and the user did not ask for depth."""
+"""Stop hook: block once when a final answer breaks the Brief output style and the user did not ask for depth."""
 
 from __future__ import annotations
 
@@ -10,12 +10,10 @@ import re
 import sys
 import time
 
-#: Prose longer than this is blocked once. Two lines rather than one: an answer
-#: that is a sentence plus a short follow-on is within the spirit, and pinning
-#: at exactly one line would fire on things nobody objects to. The character
-#: bound catches the single enormous paragraph, which the line count cannot.
-MAX_LINES = 2
-MAX_CHARS = 350
+#: Needs-you line, outcome line, and an optional went-wrong line.
+MAX_LINES = 3
+MAX_CHARS = 450
+OPENERS = ("needs you", "nothing needs you")
 #: Distinct jargon tokens tolerated in a default answer before it is refused.
 MAX_JARGON = 2
 
@@ -85,10 +83,16 @@ def _strip_uncounted(text: str) -> str:
     return text
 
 
-def _prose_shape(text: str) -> tuple[int, int]:
+def _prose_lines(text: str) -> list[str]:
     body = _strip_uncounted(text)
-    lines = [ln for ln in (l.strip() for l in body.splitlines()) if ln]
-    return len(lines), len(" ".join(lines))
+    return [ln for ln in (l.strip() for l in body.splitlines()) if ln]
+
+
+def _opens_right(lines: list[str]) -> bool:
+    if not lines:
+        return True
+    first = re.sub(r"^[*_#>\s]+", "", lines[0]).lower()
+    return first.startswith(OPENERS)
 
 
 #: Structural jargon only — shapes that cannot be ordinary English, so a false
@@ -185,13 +189,15 @@ def main() -> int:
     ):
         return 0
 
-    lines, chars = _prose_shape(assistant)
+    prose = _prose_lines(assistant)
+    lines, chars = len(prose), len(" ".join(prose))
     jargon = _jargon(assistant, user)
     too_long = lines > MAX_LINES or chars > MAX_CHARS
+    bad_opener = not _opens_right(prose)
     # Two is the threshold, not one: naming the single file they asked about is
     # answering the question, and blocking that would teach evasion.
     too_jargony = len(jargon) >= MAX_JARGON
-    if not too_long and not too_jargony:
+    if not too_long and not too_jargony and not bad_opener:
         return 0
 
     # **`hashlib`, never `hash()`.** Python randomises `hash()` per process
@@ -204,7 +210,15 @@ def main() -> int:
     if _already_blocked(payload.get("session_id", ""), fingerprint):
         return 0
 
-    if too_jargony and not too_long:
+    if bad_opener and not too_long and not too_jargony:
+        reason = (
+            "That answer did not follow the Brief output style. The first line "
+            "must be 'Needs you:' plus the one decision or input you are blocked "
+            "on, as a choice with a recommendation, or 'Nothing needs you.' Then "
+            "the outcome in one line, and one line on what went wrong only if "
+            "something did.\n\nRewrite it in that shape. This blocks once per question."
+        )
+    elif too_jargony and not too_long:
         reason = (
             f"That answer was inside the length limit but leaned on "
             f"{len(jargon)} pieces of jargon they did not use themselves: "
@@ -222,20 +236,15 @@ def main() -> int:
         )
     else:
         reason = (
-        f"That answer was {lines} line(s) and {chars} characters of prose. "
-        f"The default is ONE line, in plain English — the user's standing "
-        f"instruction in ~/.claude/CLAUDE.md.\n\n"
-        f"They did not ask for depth in their last message, so this is the default "
-        f"case. Re-answer in one line: the answer itself, no preamble, no "
-        f"summary of what you checked, no list of what is still running. A "
-        f"number and a fact are a complete answer.\n\n"
-        f"If the length was genuinely right — a correction, a completion "
-        f"report, a decision they have to make — say it again and it will go "
-        f"through. This blocks once per question, not repeatedly. But the "
-        f"measured history is that it almost never is: the answers that "
-        f"provoked a `tldr` ran a median of 1,320 characters, and every one of "
-        f"them felt like the exception while it was being written."
-    )
+            f"That answer was {lines} line(s) and {chars} characters of prose. "
+            f"The Brief output style allows at most {MAX_LINES} lines: 'Needs you:' "
+            f"(or 'Nothing needs you.'), the outcome in one sentence, and one line "
+            f"on what went wrong only if something did.\n\n"
+            f"They did not ask for depth, so re-answer in that shape: no preamble, "
+            f"no summary of what you checked, no list of what is still running.\n\n"
+            f"If the length was genuinely right, say it again and it will go "
+            f"through. This blocks once per question."
+        )
     print(json.dumps({"decision": "block", "reason": reason}))
     return 0
 

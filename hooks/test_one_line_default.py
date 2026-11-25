@@ -55,7 +55,8 @@ LONG = (
     "A third point about what is still running in the background.\n"
     "And a closing summary of everything above, restated."
 )
-ONE_LINE = "Merged and deployed; live on 8080."
+ONE_LINE = "Nothing needs you.\nMerged and deployed; live on 8080."
+BAD_OPENER = "Merged and deployed; live on 8080."
 
 
 def main() -> int:
@@ -87,6 +88,14 @@ def main() -> int:
         check("a one-line answer passes", r.get("decision") != "block", r)
 
     with tempfile.TemporaryDirectory() as home:
+        r = run([("user", "did it merge"), ("assistant", "**Needs you:** ship now or wait for review? I'd ship.\nTests pass.")], "s2b", home)
+        check("a bold Needs-you opener passes", r.get("decision") != "block", r)
+        r = run([("user", "did it merge"), ("assistant", BAD_OPENER)], "s2c", home)
+        check("a short answer without the opener is blocked", r.get("decision") == "block", r)
+        r = run([("user", "why did it merge"), ("assistant", BAD_OPENER)], "s2d", home)
+        check("asking for depth lifts the opener rule", r.get("decision") != "block", r)
+
+    with tempfile.TemporaryDirectory() as home:
         # Depth was asked for, so length is allowed.
         r = run([("user", "why did that fail?"), ("assistant", LONG)], "s3", home)
         check("an explicit 'why' unlocks length", r.get("decision") != "block", r)
@@ -101,11 +110,11 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as home:
         # A fenced block they asked to see is not prose and must not count.
-        fenced = "Run this:\n\n```\n" + "\n".join(f"line {i}" for i in range(30)) + "\n```"
+        fenced = "Nothing needs you. Run this:\n\n```\n" + "\n".join(f"line {i}" for i in range(30)) + "\n```"
         r = run([("user", "what do i run"), ("assistant", fenced)], "s5", home)
         check("a code block does not count as prose", r.get("decision") != "block", r)
 
-        table = "Here:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |"
+        table = "Nothing needs you. Here:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |"
         r = run([("user", "what did each arm score"), ("assistant", table)], "s5b", home)
         check("a table does not count as prose", r.get("decision") != "block", r)
 

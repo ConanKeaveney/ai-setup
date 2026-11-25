@@ -10,7 +10,8 @@ My portable setup for Claude Code, Codex and OpenCode: global instructions, skil
 | `skills/` | Skills: engineering judgement, design docs, code review, data-platform references (Spark, Snowflake, Databricks, Iceberg, OpenSearch, Pulsar, GraphQL), Rust style, verification |
 | `agents/` | Claude Code subagents (Python, Rust, ops runner) |
 | `codex-agents/` | Codex agent definitions |
-| `hooks/` | Claude Code hooks: block shell poll loops; push long answers back to one line |
+| `output-styles/` | Brief output style: what needs you first, then the outcome |
+| `hooks/` | Claude Code hooks: block shell poll loops; hold answers to the Brief style unless depth is asked for |
 | `bin/wait-for` | Bounded wait for a log line or condition, used by the agents and hooks |
 | `statusline/` | Claude Code status line and subagent status line |
 | `opencode/` | OpenCode TUI plugins (status line, subagent panel) and a `cli.json` template |
@@ -21,11 +22,12 @@ My portable setup for Claude Code, Codex and OpenCode: global instructions, skil
 Back up `~/.claude` first, then:
 
 ```sh
-mkdir -p ~/.claude/{skills,agents,hooks,bin}
+mkdir -p ~/.claude/{skills,agents,hooks,bin,output-styles}
 cp CLAUDE.md ~/.claude/CLAUDE.md
 cp -R skills/* ~/.claude/skills/
 cp agents/*.md ~/.claude/agents/
 cp hooks/*.py ~/.claude/hooks/
+cp output-styles/*.md ~/.claude/output-styles/
 cp bin/wait-for ~/.claude/bin/ && chmod +x ~/.claude/bin/wait-for
 cp statusline/*.py ~/.claude/ && chmod +x ~/.claude/*statusline.py
 sed "s|@HOME@|$HOME|g" settings.json.in > ~/.claude/settings.json

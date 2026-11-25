@@ -1,4 +1,5 @@
 {
+  "outputStyle": "Brief",
   "model": "opus",
   "hooks": {
     "Stop": [
